@@ -1,60 +1,34 @@
 #include <LiquidCrystal.h>
 
-#define INJECTOR_PIN 13
-#define IMPULSATOR_PIN 2
-#define IMPULSATOR_INTERRUPT 1
-#define MAX_FUEL_CONSUMPTION 36 //liter per hour
-
 //lcd and timer objects declaration
 LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
 
-//fuel consumption global variables
+uint8_t inputCapturePin = 13;
+
 volatile uint16_t startingEdge = 0; 
 volatile uint16_t endingEdge = 0; 
 volatile uint16_t currentOverflowCounter = 0;
 volatile uint16_t startOverflowCounter = 0;
 volatile uint32_t timer3Clocks = 0;
 volatile uint64_t overallTimer3Clocks = 0;
-uint16_t injectorWorkingTimePerSecond = 0;
-double consumptionPerHour = 0, consumptionPer100KM = 0;
 
-//velocity global variables
-volatile uint16_t impulsesPerSecond = 0;
-uint64_t overallImpulseCounter = 0;
-const double impulsesPerMeter = 16.85;
-uint8_t speedOfVehicle = 0;
-
-//general global variables
 volatile bool reload = false;
-uint16_t seconds = 0;
-
-
-void calculateSpeed();
-void calculateConsumption();
-void displayInfo();
-void incrementImpulsesAmmount();
+volatile uint16_t seconds = 0;
 
 
 void setup() {
+  
+  Serial.begin(9600);
 
-	//LCD init
   lcd.begin(16,2);
-  lcd.print("CHUJ1 TEST...");
+  lcd.setCursor(1,0);
+  lcd.print("IMPULSE LENGTH");
+  lcd.setCursor(3,1);
+  lcd.print("MEASURMENT");
   delay(3000);
-
+  
+  pinMode(13, INPUT);
   noInterrupts();
-  //cli();
-	//PIN's configuration  
-  pinMode(INJECTOR_PIN, INPUT);
-  pinMode(IMPULSATOR_PIN, INPUT);
-
-	//interrupts configuration
-	attachInterrupt(IMPULSATOR_INTERRUPT, incrementImpulsesAmmount, FALLING);
-
-  //impulsator interrupt
-  /*PCICR |= (1 << PCIE0);
-  EICRA |= (1 << ISC11);
-  PCMSK0 |= (1 << PCINT1);*/
 
   //T1 registers configuration
   TCCR1A = 0;
@@ -87,7 +61,6 @@ void setup() {
 
   TIMSK3 |= (1 << ICIE3)|(1 << TOIE3); //enable input capture interrupt, enable timer ovf interrupt
   interrupts();
-  //sei();
 }
 
 
@@ -95,67 +68,20 @@ void setup() {
 void loop() {
   
   if(reload) {
-    calculateSpeed();
-    calculateConsumption();
-    displayInfo();
-
+    int result = overallTimer3Clocks / 16000; //result in milliseconds
+    lcd.clear();
+    lcd.print(result);
+    lcd.setCursor(0,1);
+    lcd.print(seconds);
+    Serial.println(result);
     seconds++;
+    
+    //Serial.print(seconds);
     reload = false;
+    overallTimer3Clocks = 0;
   }
   
 }
-
-void calculateSpeed() {
-  speedOfVehicle = (impulsesPerSecond * 36) / (impulsesPerMeter * 10.00); //km/h (3600/1000) -> (36/10)
-  overallImpulseCounter += impulsesPerSecond;
-  Serial.print(impulsesPerSecond);
-  Serial.print("\t");
-  impulsesPerSecond = 0;
-}
-
-void calculateConsumption() {
-  injectorWorkingTimePerSecond = overallTimer3Clocks / 16000; //result in milliseconds
-  overallTimer3Clocks = 0;
-
-  consumptionPerHour = MAX_FUEL_CONSUMPTION * injectorWorkingTimePerSecond / 1000;
-  consumptionPer100KM = MAX_FUEL_CONSUMPTION * injectorWorkingTimePerSecond / (speedOfVehicle * 10);
-}
-
-void displayInfo() {
-  lcd.clear();
-  lcd.setCursor(0,0);
-  lcd.print("SPEED:");
-  lcd.setCursor(7,0);
-  lcd.print(speedOfVehicle);
-  Serial.print(speedOfVehicle);
-  Serial.print("\t");
-  lcd.setCursor(12,0);
-  lcd.print("KM/H");
-
-  lcd.setCursor(0,1);
-  lcd.print("CONS:");
-  lcd.setCursor(7,1);
-  if(speedOfVehicle < 5) {
-    lcd.print(injectorWorkingTimePerSecond);
-    Serial.print(injectorWorkingTimePerSecond);
-    Serial.print("\n");
-    lcd.setCursor(13,1);
-    lcd.print("L/H");
-  } else {
-    lcd.print(injectorWorkingTimePerSecond);
-    Serial.print(injectorWorkingTimePerSecond);
-    Serial.print("\n");
-    lcd.setCursor(11,1);
-    lcd.print("L/100");
-  }
-}
-
-void incrementImpulsesAmmount() {
-  //noInterrupts();
-  impulsesPerSecond++;
-  //interrupts();
-}
-
 
 //T1 1000ms interrupt
 ISR (TIMER1_COMPA_vect) {
@@ -169,7 +95,6 @@ ISR (TIMER3_OVF_vect) {
 
 ISR (TIMER3_CAPT_vect) {
   noInterrupts();
-  //cli();
   
   //checking state of ICES3bit (ICES3 == 1 -> input capture on rising edge, ICES3 == 0 -> input capture on falling edge)
   if(((TCCR3B & (1 << ICES3)) >> ICES3) == 0) {           //if falling edge occurs
