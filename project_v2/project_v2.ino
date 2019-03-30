@@ -1,5 +1,6 @@
 #include <LiquidCrystal.h>
 
+//constans
 #define INJECTOR_PIN 13
 #define IMPULSATOR_PIN 2
 #define IMPULSATOR_INTERRUPT 1
@@ -28,7 +29,7 @@ uint8_t speedOfVehicle = 0;
 volatile bool reload = false;
 uint16_t seconds = 0;
 
-
+//methods declarations
 void calculateSpeed();
 void calculateConsumption();
 void displayInfo();
@@ -39,11 +40,14 @@ void setup() {
 
 	//LCD init
   lcd.begin(16,2);
-  lcd.print("CHUJ1 TEST...");
-  delay(3000);
+  lcd.setCursor(0,0);
+  lcd.print("  ONBOARD COMP  ");
+  lcd.setCursor(0,1);
+  lcd.print("  ASTRA FX14XE  ");
+  delay(5000);
 
   noInterrupts();
-  //cli();
+
 	//PIN's configuration  
   pinMode(INJECTOR_PIN, INPUT);
   pinMode(IMPULSATOR_PIN, INPUT);
@@ -51,12 +55,9 @@ void setup() {
 	//interrupts configuration
 	attachInterrupt(IMPULSATOR_INTERRUPT, incrementImpulsesAmmount, FALLING);
 
-  //impulsator interrupt
-  /*PCICR |= (1 << PCIE0);
-  EICRA |= (1 << ISC11);
-  PCMSK0 |= (1 << PCINT1);*/
-
   //T1 registers configuration
+  //responsible for reloading whole programm every 1000[ms]
+  //-----------------------------------------------------------------------------------------------
   TCCR1A = 0;
 
   TCCR1B |= (1 << WGM12); //CTC mode
@@ -71,9 +72,12 @@ void setup() {
   TIMSK1 |= (1 << OCIE1A); //enable output capture interrupt
 
   OCR1A = 62499;
+  //-----------------------------------------------------------------------------------------------
 
 
   //T3 registers configuration
+  //responsible for measuring injector impulse length
+  //-----------------------------------------------------------------------------------------------
   TCCR3A = 0;
   
   TCCR3B |= (1 << CS30); // prescaler = 0
@@ -82,18 +86,18 @@ void setup() {
   
   TCCR3B &= ~(1 << ICES3); //input capture on falling edge
   
-
   TCNT3 = 0; // initialize counter  
 
   TIMSK3 |= (1 << ICIE3)|(1 << TOIE3); //enable input capture interrupt, enable timer ovf interrupt
+  //-----------------------------------------------------------------------------------------------
+  
   interrupts();
-  //sei();
 }
 
 
 //loop method
 void loop() {
-  
+  //reload every 1000 [ms]
   if(reload) {
     calculateSpeed();
     calculateConsumption();
@@ -108,68 +112,65 @@ void loop() {
 void calculateSpeed() {
   speedOfVehicle = (impulsesPerSecond * 36) / (impulsesPerMeter * 10.00); //km/h (3600/1000) -> (36/10)
   overallImpulseCounter += impulsesPerSecond;
-  Serial.print(impulsesPerSecond);
-  Serial.print("\t");
+  //Serial.print(impulsesPerSecond);
+  //Serial.print("\t");
   impulsesPerSecond = 0;
 }
 
 void calculateConsumption() {
   injectorWorkingTimePerSecond = overallTimer3Clocks / 16000; //result in milliseconds
-  overallTimer3Clocks = 0;
+  overallTimer3Clocks = 0;                                    //reseting timer3's clocks counter
 
-  consumptionPerHour = MAX_FUEL_CONSUMPTION * injectorWorkingTimePerSecond / 1000;
-  consumptionPer100KM = MAX_FUEL_CONSUMPTION * injectorWorkingTimePerSecond / (speedOfVehicle * 10);
+  consumptionPerHour = MAX_FUEL_CONSUMPTION * injectorWorkingTimePerSecond / 1000.0;
+  consumptionPer100KM = MAX_FUEL_CONSUMPTION * injectorWorkingTimePerSecond / (speedOfVehicle * 10.0);
 }
 
 void displayInfo() {
   lcd.clear();
+  
+  //displaying speed
   lcd.setCursor(0,0);
   lcd.print("SPEED:");
   lcd.setCursor(7,0);
   lcd.print(speedOfVehicle);
-  Serial.print(speedOfVehicle);
-  Serial.print("\t");
   lcd.setCursor(12,0);
   lcd.print("KM/H");
 
+  //displaying fuel consumption
   lcd.setCursor(0,1);
   lcd.print("CONS:");
   lcd.setCursor(7,1);
-  if(speedOfVehicle < 5) {
-    lcd.print(injectorWorkingTimePerSecond);
-    Serial.print(injectorWorkingTimePerSecond);
-    Serial.print("\n");
+
+  if(speedOfVehicle < 5) {            //when car is driving
+    lcd.print(consumptionPerHour, 1);
     lcd.setCursor(13,1);
     lcd.print("L/H");
-  } else {
-    lcd.print(injectorWorkingTimePerSecond);
-    Serial.print(injectorWorkingTimePerSecond);
-    Serial.print("\n");
+  } else {                            //when car is standing (almost)
+    lcd.print(consumptionPer100KM, 1);
     lcd.setCursor(11,1);
     lcd.print("L/100");
   }
 }
 
+//ISR for attatched interrupt
 void incrementImpulsesAmmount() {
-  //noInterrupts();
   impulsesPerSecond++;
-  //interrupts();
 }
-
 
 //T1 1000ms interrupt
 ISR (TIMER1_COMPA_vect) {
   reload = true;
 }
 
+//T3 overflow interrupt
 ISR (TIMER3_OVF_vect) {
   //ovf per 65536 timer clocks (4.096 [ms])
   currentOverflowCounter++;
 }
 
+//interrupt on pin 13
 ISR (TIMER3_CAPT_vect) {
   noInterrupts();
-  //cli();
   
   //checking state of ICES3bit (ICES3 == 1 -> input capture on rising edge, ICES3 == 0 -> input capture on falling edge)
   if(((TCCR3B & (1 << ICES3)) >> ICES3) == 0) {           //if falling edge occurs
