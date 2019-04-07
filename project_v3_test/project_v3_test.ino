@@ -1,5 +1,7 @@
+#include <EEPROMex.h>
+#include <EEPROMVar.h>
 #include <LiquidCrystal.h>
-#include <string>
+#include <string.h>
 #include <avr/wdt.h>
 
 
@@ -8,20 +10,28 @@
 //----------------------------------------------------------------------------------------------------------------------------------------------------
 #define INJECTOR_PIN 13
 #define IMPULSATOR_PIN 2
-#define IMPULSATOR_INTERRUPT 1
+#define UP_BUTTON_PIN 1
+#define DOWN_BUTTON_PIN 0
 
-#define UP_BUTTON_PIN_INTERRUPT 0 //TODO: to define
-#define DOWN_BUTTON_PIN_INTERRUPT 0 //TODO: to define
-#define OPTIONS_AMMOUNT 5
+#define IMPULSATOR_INTERRUPT 1
+#define UP_BUTTON_PIN_INTERRUPT 3 
+#define DOWN_BUTTON_PIN_INTERRUPT 2 
 
 #define MAX_FUEL_CONSUMPTION 36 //liter per hour
 #define IMPULSES_PER_METER 16.85
 
 #define UPPER_LINE 0
 #define LOWER_LINE 1
+#define OPTIONS_AMMOUNT 5
 
 #define SCREEN_WIDTH 16
 #define SCREEN_HEIGHT 2
+
+#define AVG_CONSUMPTION_SUM_EEPROM_ADDRESS 0
+#define AVG_CONSUMPTION_DIVIDER_EEPROM_ADDRESS 4
+#define AVG_SPEED_SUM_EEPROM_ADDRESS 8
+#define AVG_SPEED_DIVIDER_EEPROM_ADDRESS 12
+#define IMPULSE_COUNTER_EEPROM_ADDRESS 16
 //----------------------------------------------------------------------------------------------------------------------------------------------------
 
 
@@ -42,16 +52,16 @@ volatile uint64_t overallTimer3Clocks = 0;
 uint16_t injectorWorkingTimePerSecond = 0;
 double consumptionPerHour = 0, consumptionPer100KM = 0;
 double averageConsumptionPer100KM = 0;
-uint64_t averageConsumptionSum = 0;
+uint32_t averageConsumptionSum = 0;
 uint32_t averageConsumptionDivider = 0;
 
 
 //speed global variables
 volatile uint16_t impulsesPerSecond = 0;
-uint64_t overallImpulseCounter = 0;
+uint32_t overallImpulseCounter = 0;
 uint8_t speedOfVehicle = 0;
 uint8_t averageSpeed = 0;
-uint64_t averageSpeedSum = 0;
+uint32_t averageSpeedSum = 0;
 uint32_t averageSpeedDivider = 0;
 
 
@@ -65,6 +75,10 @@ bool upButtonPressed = false;
 bool downButtonPressed = false;
 uint8_t upLineCounter = 0;
 uint8_t downLineCounter = 2;
+
+
+//EEPROM
+uint16_t drivingTime = 0;
 
 
 //general global variables
@@ -100,6 +114,8 @@ void setup() {
 	//PIN's configuration  
   pinMode(INJECTOR_PIN, INPUT);
   pinMode(IMPULSATOR_PIN, INPUT);
+  pinMode(UP_BUTTON_PIN, INPUT_PULLUP);
+  pinMode(DOWN_BUTTON_PIN, INPUT_PULLUP);
 
 	//interrupts configuration
 	attachInterrupt(IMPULSATOR_INTERRUPT, incrementImpulsesAmmountISR, FALLING);
@@ -143,6 +159,7 @@ void setup() {
   //-----------------------------------------------------------------------------------------------
   
   wdt_enable(WDTO_2S); //wdt init
+  loadEEPROM();        //EEPROM init
   interrupts();
 }
 //----------------------------------------------------------------------------------------------------------------------------------------------------
@@ -151,18 +168,23 @@ void setup() {
 
 //loop
 //----------------------------------------------------------------------------------------------------------------------------------------------------
-void loop() {
-  if(screenReload) {
+void loop() { //TODO: improve this
+  if(screenReload and reload) {
     //reload every 1000 [ms]
     if(reload) {
       calculateSpeed();
       calculateConsumption();
+      calculateAverageSpeed();
+      calculateAverageConsumption();
 
       //calculate distance every 10 second
       if((seconds % 10) == 0) 
         calculateDistance();
     
       reload = false;
+    
+      saveEEPROM();
+      isCarDriving();
       wdt_reset();
     }
     displayInfo();
@@ -235,10 +257,14 @@ void calculateSpeed() {
   speedOfVehicle = (impulsesPerSecond * 36) / (IMPULSES_PER_METER * 10.00); //km/h (3600/1000) -> (36/10)
   overallImpulseCounter += impulsesPerSecond;
   impulsesPerSecond = 0;
+}
 
-  averageSpeedSum += speedOfVehicle;
-  averageSpeedDivider++;
-  averageSpeed = averageSpeedSum / averageSpeedDivider; 
+void calculateAverageSpeed() {
+  if(speedOfVehicle > 0) {
+    averageSpeedSum += speedOfVehicle;
+    averageSpeedDivider++;
+    averageSpeed = averageSpeedSum / averageSpeedDivider; 
+  }
 }
 
 void calculateConsumption() {
@@ -247,14 +273,19 @@ void calculateConsumption() {
 
   consumptionPerHour = MAX_FUEL_CONSUMPTION * injectorWorkingTimePerSecond / 1000.0;
   consumptionPer100KM = MAX_FUEL_CONSUMPTION * injectorWorkingTimePerSecond / (speedOfVehicle * 10.0);
+}
 
-  averageConsumptionSum += (uint64_t)round(consumptionPer100KM);
-  averageConsumptionDivider++;
+void calculateAverageConsumption() {
+  if(speedOfVehicle > 5) {
+    averageConsumptionSum += ((uint32_t)round(consumptionPer100KM));
+    averageConsumptionDivider++;
+    averageConsumptionPer100KM = averageConsumptionSum / (averageConsumptionDivider * 1.0);
+  }
 }
 
 void calculateDistance() {
   overallDistanceMeters = overallImpulseCounter / IMPULSES_PER_METER;
-  overallDistanceKilometers = overallDistanceMeters / 100;
+  overallDistanceKilometers = overallDistanceMeters / 1000.0;
 }
 //----------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -288,65 +319,65 @@ void checkForButtons() {
 //display methods
 //----------------------------------------------------------------------------------------------------------------------------------------------------
 void displayTempSpeed(uint8_t line) {
-  string toDisplay = to_string((int)speedOfVehicle); 
+  String toDisplay = String((int)speedOfVehicle); 
   
   lcd.setCursor(0, line);
   lcd.print("                ");
   lcd.setCursor(0, line);
   lcd.print("SPEED: ");
-  lcd.setCursor(SCREEN_WIDTH - strlen(toDisplay), line);
+  lcd.setCursor(SCREEN_WIDTH - toDisplay.length(), line);
   lcd.print(toDisplay);
 }
 
 void displayAvgSpeed(uint8_t line) {
-  string toDisplay = to_string((int)averageSpeed); 
+  String toDisplay = String((int)averageSpeed); 
   
   lcd.setCursor(0, line);
   lcd.print("                ");
   lcd.setCursor(0, line);
   lcd.print("AVG SPEED: ");
-  lcd.setCursor(SCREEN_WIDTH - strlen(toDisplay), line);
+  lcd.setCursor(SCREEN_WIDTH - toDisplay.length(), line);
   lcd.print(toDisplay);
 }
 
 void displayTempConsumption(uint8_t line) {
-  string toDisplay;
-
+  String toDisplay;
+  
   if(speedOfVehicle > 5)
-    toDisplay = to_string((double)consumptionPer100KM); 
+    toDisplay = String((double)consumptionPer100KM, 1); 
   else
-    toDisplay = to_string((double)consumptionPerHour);
+    toDisplay = String((double)consumptionPerHour, 1);
   
   lcd.setCursor(0, line);
   lcd.print("                ");
   lcd.setCursor(0, line);
   lcd.print("CONS: ");
-  lcd.setCursor(SCREEN_WIDTH - strlen(toDisplay) + 1, line);
+  lcd.setCursor(SCREEN_WIDTH - toDisplay.length(), line);
   lcd.print(toDisplay);
 }
 
 void displayAvgConsumption(uint8_t line) {
-  string toDisplay = to_string((double)averageConsumptionPer100KM);
+  String toDisplay = String((double)averageConsumptionPer100KM, 1);
   
   lcd.setCursor(0, line);
   lcd.print("                ");
   lcd.setCursor(0, line);
   lcd.print("AVG CONS: ");
-  lcd.setCursor(SCREEN_WIDTH - strlen(toDisplay) + 1, line);
+  lcd.setCursor(SCREEN_WIDTH - toDisplay.length(), line);
   lcd.print(toDisplay);
 }
 
 void displayDistance(uint8_t line) {
-  string toDisplay = to_string((double)overallDistanceKilometers); 
+  String toDisplay = String((double)overallDistanceKilometers, 1); 
   
   lcd.setCursor(0, line);
   lcd.print("                ");
   lcd.setCursor(0, line);
   lcd.print("ODO: ");
   if(overallDistanceKilometers < 10.0)
-    lcd.setCursor(SCREEN_WIDTH - strlen(toDisplay) + 1, line);
+    lcd.setCursor(SCREEN_WIDTH - toDisplay.length(), line);
   else
-    lcd.setCursor(SCREEN_WIDTH - strlen(toDisplay) + 3, line);
+    lcd.setCursor(SCREEN_WIDTH - toDisplay.length() + 2, line);
   lcd.print(toDisplay);
 }
 
@@ -379,4 +410,48 @@ void displayInfo() {
         break;
   }
 }
+//----------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+//EEPROM manipulation methods
+//----------------------------------------------------------------------------------------------------------------------------------------------------
+void isCarDriving() {
+  if(speedOfVehicle > 0)
+    drivingTime++;
+   else drivingTime = 0;
+}
+
+
+void saveEEPROM() {
+  if(speedOfVehicle == 0 and drivingTime >= 30 and EEPROM.isReady()) {
+    Serial.println("save!");
+    EEPROM.writeLong(AVG_CONSUMPTION_SUM_EEPROM_ADDRESS, averageConsumptionSum);
+    EEPROM.writeLong(AVG_CONSUMPTION_DIVIDER_EEPROM_ADDRESS, averageConsumptionDivider);
+    EEPROM.writeLong(AVG_SPEED_SUM_EEPROM_ADDRESS, averageSpeedSum);
+    EEPROM.writeLong(AVG_SPEED_DIVIDER_EEPROM_ADDRESS, averageSpeedDivider);
+    EEPROM.writeLong(IMPULSE_COUNTER_EEPROM_ADDRESS, overallImpulseCounter);
+  }
+}
+
+void loadEEPROM() {
+  if(EEPROM.isReady()) {
+    averageConsumptionSum = EEPROM.readLong(AVG_CONSUMPTION_SUM_EEPROM_ADDRESS);
+    averageConsumptionDivider = EEPROM.readLong(AVG_CONSUMPTION_DIVIDER_EEPROM_ADDRESS);
+    averageSpeedSum = EEPROM.readLong(AVG_SPEED_SUM_EEPROM_ADDRESS);
+    averageSpeedDivider = EEPROM.readLong(AVG_SPEED_DIVIDER_EEPROM_ADDRESS);
+    overallImpulseCounter = EEPROM.readLong(IMPULSE_COUNTER_EEPROM_ADDRESS);
+    
+    Serial.print(averageConsumptionSum);
+    Serial.print("\t");
+    Serial.print(averageConsumptionDivider);
+    Serial.print("\t");
+    Serial.print(averageSpeedSum);
+    Serial.print("\t");
+    Serial.print(averageSpeedDivider);
+    Serial.print("\t");
+    Serial.println(overallImpulseCounter);
+  }    
+}
+
 //----------------------------------------------------------------------------------------------------------------------------------------------------
